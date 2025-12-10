@@ -1,4 +1,5 @@
 # KDS_SEM
 
-## Semestral project from KDS course at FEE CTU in Prague.
-- sends UDP protocols of any kind of files
+## Semestral project OF KDS course at FEE CTU in Prague.
+- Sender side
+- sending UDP protocols of any kind of files
