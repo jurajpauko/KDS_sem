@@ -12,7 +12,7 @@
 static constexpr std::size_t MAX_PACKET_SIZE = 1024;  // podľa zadania
 static constexpr std::size_t OFFSET_SIZE     = 4;     // uint32_t offset
 
-// pošle textový "control" paket (NAME=..., SIZE=..., START, STOP)
+// text controll packet
 bool sendTextPacket(SOCKET sock, const sockaddr_in &addr, const std::string &text) {
     int sent = sendto(sock, text.c_str(), static_cast<int>(text.size()), 0,
                       reinterpret_cast<const sockaddr*>(&addr),
@@ -57,7 +57,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // otvor súbor
+    // open file
     std::ifstream file(filePath, std::ios::binary | std::ios::ate);
     if (!file) {
         std::cerr << "Cannot open file: " << filePath << "\n";
@@ -69,7 +69,7 @@ int main(int argc, char* argv[]) {
     std::streamsize fileSize = file.tellg();
     file.seekg(0, std::ios::beg);
 
-    // extrahuj len názov súboru (bez cesty)
+    // file name
     std::string fileName;
     std::size_t pos = filePath.find_last_of("/\\");
     if (pos == std::string::npos)
@@ -81,14 +81,14 @@ int main(int argc, char* argv[]) {
               << "' (" << fileSize << " bytes) to "
               << receiverIp << ":" << receiverPort << "\n";
 
-    // 1) NAME=...
+    // 1) NAME
     if (!sendTextPacket(sock, addr, "NAME=" + fileName)) {
         closeSocket(sock);
         cleanupSockets();
         return 1;
     }
 
-    // 2) SIZE=...
+    // 2) SIZE
     if (!sendTextPacket(sock, addr, "SIZE=" + std::to_string(fileSize))) {
         closeSocket(sock);
         cleanupSockets();
@@ -102,7 +102,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // 4) DATA pakety
+    // 4) DATA PACKETS
     std::vector<char> buffer(MAX_PACKET_SIZE);
     std::uint32_t offset = 0;
 
