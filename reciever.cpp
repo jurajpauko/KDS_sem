@@ -1,4 +1,4 @@
-// receiver.cpp
+// RECIEVER
 #include "socket_utils.hpp"
 
 #include <iostream>
@@ -69,7 +69,6 @@ int main(int argc, char* argv[]) {
         if (len <= 0)
             continue;
 
-        // interpretuj paket ako string kvôli kontrolným správam
         std::string msg(packet.data(), packet.data() + len);
 
         if (msg.rfind("NAME=", 0) == 0) {
@@ -80,7 +79,7 @@ int main(int argc, char* argv[]) {
 
         if (msg.rfind("SIZE=", 0) == 0) {
             expectedSize = static_cast<std::size_t>(std::stoull(msg.substr(5)));
-            fileBuffer.assign(expectedSize, 0);   // alokujeme buffer na celý súbor
+            fileBuffer.assign(expectedSize, 0);
             std::cout << "Expected size: " << expectedSize << " bytes\n";
             continue;
         }
@@ -96,7 +95,6 @@ int main(int argc, char* argv[]) {
             break;
         }
 
-        // inak je to DATA paket
         if (!started || fileBuffer.empty()) {
             std::cerr << "Received data before START/SIZE.\n";
             continue;

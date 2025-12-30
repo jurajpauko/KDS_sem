@@ -1,4 +1,4 @@
-// sender.cpp
+// SENDER
 #include "socket_utils.hpp"
 
 #include <iostream>
@@ -9,8 +9,8 @@
 #include <cstring>
 #include <cstdio>
 
-static constexpr std::size_t MAX_PACKET_SIZE = 1024;  // podľa zadania
-static constexpr std::size_t OFFSET_SIZE     = 4;     // uint32_t offset
+static constexpr std::size_t MAX_PACKET_SIZE = 1024;
+static constexpr std::size_t OFFSET_SIZE     = 4;
 
 // text controll packet
 bool sendTextPacket(SOCKET sock, const sockaddr_in &addr, const std::string &text) {
