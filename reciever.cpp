@@ -1,5 +1,11 @@
 // RECIEVER
+#define NOMINMAX
+#include <openssl/sha.h>
+#include "packet_definitions.h"
+
+#include "sha256.hpp"
 #include "socket_utils.hpp"
+#include "crc32.hpp"
 
 #include <iostream>
 #include <fstream>
@@ -8,17 +14,21 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <algorithm>
 
-static constexpr std::size_t MAX_PACKET_SIZE = 1024;
-static constexpr std::size_t OFFSET_SIZE     = 4;
+
+
 
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        std::cerr << "Usage:\n  " << argv[0] << " <listen_port>\n";
+    if (argc != 4) {
+        std::cerr << "Usage:\n  " << argv[0] << " <local_port> <target_port> <target_ip>\n";
         return 1;
     }
-
-    int listenPort = std::stoi(argv[1]);
+    // localing on this port - senders target port
+    int local_port = std::stoi(argv[1]);
+    // sending ack to this port - senders local port
+    int target_port = std::stoi(argv[2]);
+    const char *target_ip = argv[3];
 
     if (!initSockets()) {
         return 1;
@@ -30,111 +40,135 @@ int main(int argc, char* argv[]) {
         cleanupSockets();
         return 1;
     }
+    // used for socket timeout
+    DWORD timeout_ms = 1000;
+    // recvfrom will wait max 1 second
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms)) < 0) {
+        perror("setsockopt failed");
+        closeSocket(sock);
+        return 1;
+    }
 
-    sockaddr_in addr{};
-    addr.sin_family      = AF_INET;
-    addr.sin_port        = htons(static_cast<uint16_t>(listenPort));
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    sockaddr_in local{}, target{};
+    local.sin_family      = AF_INET; // IPv4
+    local.sin_port        = htons(static_cast<uint16_t>(local_port)); // Convert host byte order - Little/Big endian
+    local.sin_addr.s_addr = htonl(INADDR_ANY); 
+    target.sin_family      = AF_INET;
+    target.sin_port        = htons(static_cast<uint16_t>(target_port));
+    inet_pton(AF_INET, target_ip, &target.sin_addr); // we will send N/ACK to this IP and this port
 
-    if (bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+    if (bind(sock, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == SOCKET_ERROR) {
         std::perror("bind");
         closeSocket(sock);
         cleanupSockets();
         return 1;
     }
 
-    std::cout << "Listening on UDP port " << listenPort << "...\n";
+    std::cout << "Localing on UDP port " << local_port << ". Waiting for start packet...\n";
 
-    std::string      fileName;
-    std::vector<char> fileBuffer;
-    std::size_t      expectedSize = 0;
-    bool             started      = false;
+    std::ofstream file; 
+    StartPacket start_packet;
+    socklen_t len_start = sizeof(target);
+    bool started = false;
 
-    std::vector<char> packet(MAX_PACKET_SIZE);
-
-    while (true) {
-        sockaddr_in senderAddr{};
-        socklen_t senderLen = sizeof(senderAddr);
-
-        int len = recvfrom(sock,
-                           packet.data(),
-                           static_cast<int>(packet.size()),
-                           0,
-                           reinterpret_cast<sockaddr*>(&senderAddr),
-                           &senderLen);
-        if (len == SOCKET_ERROR) {
-            std::perror("recvfrom");
-            break;
+    char tmp_buffer[sizeof(StartPacket) + 10];
+    // waiting for start packet - max wait time = 1 second, max tries = 15
+    int tries = 0;
+    while (!started) {
+        int n = recvfrom(sock,reinterpret_cast<char*>(&tmp_buffer),sizeof(tmp_buffer),0,reinterpret_cast<sockaddr*>(&target),&len_start);
+        if (n < 0) {
+            tries++;
+            if (tries > 15) {
+                std::cerr << "CLOSING: No start packet received after 15 tries\n";
+                closeSocket(sock);
+                cleanupSockets();
+                return 1;
+            }
+            continue; 
         }
-        if (len <= 0)
-            continue;
+        PacketType received_type = *(PacketType*)tmp_buffer;
+        if (received_type == START) {
+            std::memcpy(&start_packet, tmp_buffer, std::min((size_t)n, sizeof(StartPacket)));
+            std::cout << "Start packet recieved. Filename: " << start_packet.file_name 
+                      << ", Size: " << start_packet.file_size << " B\n";
 
-        std::string msg(packet.data(), packet.data() + len);
-
-        if (msg.rfind("NAME=", 0) == 0) {
-            fileName = msg.substr(5);
-            std::cout << "Incoming file: " << fileName << "\n";
-            continue;
-        }
-
-        if (msg.rfind("SIZE=", 0) == 0) {
-            expectedSize = static_cast<std::size_t>(std::stoull(msg.substr(5)));
-            fileBuffer.assign(expectedSize, 0);
-            std::cout << "Expected size: " << expectedSize << " bytes\n";
-            continue;
-        }
-
-        if (msg == "START") {
+            file.open(("received/" + std::string(start_packet.file_name)).c_str(),std::ios::binary | std::ios::out);
+            if (!file.is_open()) {
+                std::cerr << "ERROR: Could not open file: " << start_packet.file_name << "\n";
+                closeSocket(sock);
+                cleanupSockets();
+                return 1;
+            }
+            ControlPacket ack_packet = {ACK, 0}; 
+            sendto(sock,reinterpret_cast<const char*>(&ack_packet),sizeof(ControlPacket),0,reinterpret_cast<const sockaddr*>(&target),len_start);
+            std::cout << "ACK sent, ready to recieve data.\n";
             started = true;
-            std::cout << "Receiving data...\n";
-            continue;
+        } else {
+            std::cout << "Unexpected packet type: " << received_type << " was recieved. Waiting for START packet.\n";
+        }
+    }
+
+    socklen_t len = len_start;
+    uint32_t seq_num = 0; 
+    tries = 0;
+    DataPacket data_packet;
+    while (true) {
+        int n = recvfrom(sock,reinterpret_cast<char*>(&data_packet),sizeof(data_packet),0,reinterpret_cast<sockaddr*>(&target),&len);
+        if (n < 0) {
+            std::perror("Failed to recieve packet, trying again...");
+            tries++;
+            if (tries > 15) {
+                std::cerr << "CLOSING: No data packet recieved after 15 tries.\n";
+                closeSocket(sock);
+                cleanupSockets();
+                return 1;
+            }
         }
 
-        if (msg == "STOP") {
-            std::cout << "STOP received.\n";
+        if (n == sizeof(ControlPacket) && ((ControlPacket*)&data_packet)->type == STOP) {
+            std::cout << "CLOSING: STOP packet recieved\n";
             break;
         }
 
-        if (!started || fileBuffer.empty()) {
-            std::cerr << "Received data before START/SIZE.\n";
+        if (n == sizeof(StartPacket)) {
+            ControlPacket ack_packet = {ACK, 0}; 
+            sendto(sock,reinterpret_cast<const char*>(&ack_packet),sizeof(ControlPacket),0,reinterpret_cast<const sockaddr*>(&target),len);
+            std::cout << "ACK sent, ready to recieve data.\n";
             continue;
         }
 
-        if (len < static_cast<int>(OFFSET_SIZE)) {
-            std::cerr << "Short data packet.\n";
-            continue;
-        }
-
-        std::uint32_t netOffset = 0;
-        std::memcpy(&netOffset, packet.data(), OFFSET_SIZE);
-        std::uint32_t offset = ntohl(netOffset);
-
-        std::size_t dataLen = static_cast<std::size_t>(len) - OFFSET_SIZE;
-
-        if (offset + dataLen > fileBuffer.size()) {
-            std::cerr << "Packet outside bounds (offset=" << offset
-                      << ", len=" << dataLen << ")\n";
-            continue;
-        }
-
-        std::memcpy(fileBuffer.data() + offset,
-                    packet.data() + OFFSET_SIZE,
-                    dataLen);
-    }
-
-    if (!fileName.empty() && !fileBuffer.empty()) {
-        std::ofstream out(fileName, std::ios::binary);
-        if (!out) {
-            std::cerr << "Cannot create output file '" << fileName << "'\n";
+        if (data_packet.seq_num == seq_num) {
+            if (data_packet.data_size > MAX_PAYLOAD_SIZE || n < (int)(sizeof(DataPacket) - MAX_PAYLOAD_SIZE + data_packet.data_size)) {
+                std::cerr << "IGNORING: invalid packet size.\n";
+                continue;
+            }
+            uint32_t calc_crc = crc32(reinterpret_cast<const uint8_t*>(data_packet.payload),data_packet.data_size);
+            if (calc_crc == data_packet.crc) {
+                file.write(data_packet.payload, data_packet.data_size);
+                ControlPacket ack_packet = {ACK, data_packet.seq_num};
+                sendto(sock,reinterpret_cast<const char*>(&ack_packet),sizeof(ControlPacket),0,reinterpret_cast<const sockaddr*>(&target),len);
+                std::cout << "Packet " << seq_num << " recieved succesfully. ACK sent.\n";
+                tries = 0;
+                seq_num++; 
+            } else {
+                ControlPacket nack_packet = {NACK, data_packet.seq_num};
+                sendto(sock,reinterpret_cast<const char*>(&nack_packet),sizeof(ControlPacket),0,reinterpret_cast<const sockaddr*>(&target),len);
+                tries = 0;
+                std::cout << "CRC missmatch for packet " << data_packet.seq_num << ". NACK sent.\n";
+            }
         } else {
-            out.write(fileBuffer.data(), static_cast<std::streamsize>(fileBuffer.size()));
-            std::cout << "Saved file '" << fileName
-                      << "' (" << fileBuffer.size() << " bytes).\n";
-        }
-    } else {
-        std::cerr << "No file received.\n";
+            ControlPacket ack_packet = {ACK, data_packet.seq_num};
+            sendto(sock,reinterpret_cast<const char*>(&ack_packet),sizeof(ControlPacket),0,reinterpret_cast<const sockaddr*>(&target),len);
+            std::cout << "Duplicite packet " << data_packet.seq_num << " recieved. ACK sent again.\n";
+        }      
+
     }
 
+    file.close();
+    std::string received_file_hash = sha256(start_packet.file_name);
+    std::cout << "File transmitted. SHA-256 hash of the recieved file: " << received_file_hash << ".\n";
+    std::cout << "Expected hash: " << start_packet.hash << ".\n";
+    std::cout << (received_file_hash == std::string(start_packet.hash) ? "Hash match" : "Hash missmatch") << ".\n";
     closeSocket(sock);
     cleanupSockets();
     return 0;

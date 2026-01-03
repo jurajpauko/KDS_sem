@@ -1,5 +1,10 @@
 // SENDER
 #include "socket_utils.hpp"
+#include "packet_definitions.h"
+
+#include "sha256.hpp"
+#include "socket_utils.hpp"
+#include "crc32.hpp"
 
 #include <iostream>
 #include <fstream>
@@ -8,32 +13,22 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <algorithm>
 
-static constexpr std::size_t MAX_PACKET_SIZE = 1024;
-static constexpr std::size_t OFFSET_SIZE     = 4;
-
-// text controll packet
-bool sendTextPacket(SOCKET sock, const sockaddr_in &addr, const std::string &text) {
-    int sent = sendto(sock, text.c_str(), static_cast<int>(text.size()), 0,
-                      reinterpret_cast<const sockaddr*>(&addr),
-                      sizeof(addr));
-    if (sent == SOCKET_ERROR) {
-        std::perror("sendto (control)");
-        return false;
-    }
-    return true;
-}
 
 int main(int argc, char* argv[]) {
-    if (argc != 4) {
-        std::cerr << "Usage:\n  " << argv[0]
-                  << " <receiver_ip> <receiver_port> <file_path>\n";
+    if (argc != 5) {
+        std::cerr << "Usage:\n  " << argv[0] << " <target_ip> <target_port> <local_port> <file_path>\n";
         return 1;
     }
 
-    std::string receiverIp   = argv[1];
-    int         receiverPort = std::stoi(argv[2]);
-    std::string filePath     = argv[3];
+    const char *target_ip = argv[1];
+    // receivers local port
+    int         target_port = std::atoi(argv[2]);
+    // receivers target port, we will recieve N/ACK here
+    int         local_port = std::atoi(argv[3]);
+    // full path to the file we want to send
+    const char *file_path     = argv[4];
 
     if (!initSockets()) {
         return 1;
@@ -45,98 +40,158 @@ int main(int argc, char* argv[]) {
         cleanupSockets();
         return 1;
     }
+    // used for socket timeout
+    DWORD timeout_ms = 1000;
+    // recvfrom will wait max 1 second
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms)) < 0) {
+        perror("setsockopt failed");
+        closeSocket(sock);
+        return 1;
+    }
 
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons(static_cast<uint16_t>(receiverPort));
+    sockaddr_in local{}, target{};
+    local.sin_family      = AF_INET;
+    local.sin_port        = htons(static_cast<uint16_t>(local_port));
+    local.sin_addr.s_addr = htonl(INADDR_ANY);
 
-    if (inet_pton(AF_INET, receiverIp.c_str(), &addr.sin_addr) != 1) {
+    if (bind(sock, (const struct sockaddr *)&local, sizeof(local)) < 0) {
+        perror("Bind failed");
+        closeSocket(sock);
+        return 1;
+    }
+
+    target.sin_family      = AF_INET;
+    target.sin_port        = htons(static_cast<uint16_t>(target_port));
+    inet_pton(AF_INET, target_ip, &target.sin_addr);
+
+    if (inet_pton(AF_INET, target_ip, &target.sin_addr) != 1) {
         std::cerr << "Invalid receiver IP address\n";
         closeSocket(sock);
         cleanupSockets();
         return 1;
     }
 
-    // open file
-    std::ifstream file(filePath, std::ios::binary | std::ios::ate);
-    if (!file) {
-        std::cerr << "Cannot open file: " << filePath << "\n";
+    std::string file_hash;
+    try {
+        file_hash = sha256(file_path);
+    } catch (const std::exception& e) {
+        std::cerr << "SHA256 error: " << e.what() << "\n";
         closeSocket(sock);
         cleanupSockets();
         return 1;
     }
 
-    std::streamsize fileSize = file.tellg();
+    std::ifstream file(file_path, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "ERROR: Could not open file: " << file_path << "\n";
+        closeSocket(sock);
+        cleanupSockets();
+        return 1;
+    }
+    file.seekg(0, std::ios::end);
+    long file_size = file.tellg();
+    file.clear();
     file.seekg(0, std::ios::beg);
 
-    // file name
-    std::string fileName;
-    std::size_t pos = filePath.find_last_of("/\\");
-    if (pos == std::string::npos)
-        fileName = filePath;
-    else
-        fileName = filePath.substr(pos + 1);
-
-    std::cout << "Sending file '" << fileName
-              << "' (" << fileSize << " bytes) to "
-              << receiverIp << ":" << receiverPort << "\n";
-
-    // 1) NAME
-    if (!sendTextPacket(sock, addr, "NAME=" + fileName)) {
-        closeSocket(sock);
-        cleanupSockets();
-        return 1;
+    const char *file_name = file_path;
+    const char *last_slash = strrchr(file_path, '/');
+    if (last_slash) {
+        file_name = last_slash + 1;
     }
 
-    // 2) SIZE
-    if (!sendTextPacket(sock, addr, "SIZE=" + std::to_string(fileSize))) {
-        closeSocket(sock);
-        cleanupSockets();
-        return 1;
-    }
+    StartPacket start_packet;
+    start_packet.type = START;
+    start_packet.file_size = (uint32_t)file_size;
+    std::strncpy(start_packet.file_name, file_name, MAX_FILENAME_SIZE - 1);
+    start_packet.file_name[MAX_FILENAME_SIZE - 1] = '\0';
+    std::strncpy(start_packet.hash, file_hash.c_str(), 65);
+    start_packet.hash[64] = '\0';
+    
+    int tries = 0;
+    bool started = false;
+    std::cout << "Sending START. File: " << file_name << ", Size: " << file_size << " B" 
+              << ", Hash: " << file_hash << "to " << target_ip << ": " << target_port << "\n";
 
-    // 3) START
-    if (!sendTextPacket(sock, addr, "START")) {
-        closeSocket(sock);
-        cleanupSockets();
-        return 1;
-    }
-
-    // 4) DATA PACKETS
-    std::vector<char> buffer(MAX_PACKET_SIZE);
-    std::uint32_t offset = 0;
-
-    while (true) {
-        file.read(buffer.data() + OFFSET_SIZE,
-                  static_cast<std::streamsize>(MAX_PACKET_SIZE - OFFSET_SIZE));
-        std::streamsize bytesRead = file.gcount();
-        if (bytesRead <= 0)
-            break;
-
-        std::uint32_t netOffset = htonl(offset);
-        std::memcpy(buffer.data(), &netOffset, OFFSET_SIZE);
-
-        std::size_t packetSize = OFFSET_SIZE + static_cast<std::size_t>(bytesRead);
-
-        int sent = sendto(sock,
-                          buffer.data(),
-                          static_cast<int>(packetSize),
-                          0,
-                          reinterpret_cast<const sockaddr*>(&addr),
-                          sizeof(addr));
-        if (sent == SOCKET_ERROR) {
-            std::perror("sendto (data)");
-            break;
+    while (!started) {
+        // Send START packetk
+        sendto(sock,reinterpret_cast<const char*>(&start_packet),sizeof(StartPacket),0,reinterpret_cast<const sockaddr*>(&target), sizeof(target));
+        ControlPacket control_packet;
+        socklen_t len = sizeof(local);
+        int n = recvfrom(sock,reinterpret_cast<char*>(&control_packet),sizeof(control_packet),0,reinterpret_cast<sockaddr*>(&target), &len);
+        if (n < 0) {
+            std::cout << "Timemout: ACK for START not recieved. Sending again...\n";
+            tries++;
+            if (tries > 15) {
+                std::cerr << "ENDING: Did not recieve ACK for START after 15 tries.\n";
+                closeSocket(sock);
+                cleanupSockets();
+                return 1;
+            }
+            continue; 
         }
 
-        offset += static_cast<std::uint32_t>(bytesRead);
+        if (n == sizeof(ControlPacket) && control_packet.type == ACK && control_packet.seq_num == 0) {
+            std::cout << "Recieved ACK for START. Starting to send data.\n";
+            started = true;
+        } else {
+            std::cout << "Unexpected packet recieved. Sending START again.\n";
+        }
     }
 
-    // 5) STOP
-    sendTextPacket(sock, addr, "STOP");
-
-    std::cout << "Done.\n";
-
+    uint32_t seq_num = 0; 
+    tries = 0;
+    char buffer[MAX_PAYLOAD_SIZE];
+    while (true) {
+        file.read(buffer, MAX_PAYLOAD_SIZE);
+        size_t bytes_read = file.gcount();
+        if (bytes_read <= 0) {
+            std::cout << "0 bytes read.\n";
+            break;
+        }
+        bool packet_sent = false;
+        DataPacket data_packet;
+        data_packet.seq_num = seq_num;
+        data_packet.data_size = (uint16_t)bytes_read;
+        data_packet.crc = crc32(reinterpret_cast<const uint8_t*>(buffer), bytes_read);
+        std::memcpy(data_packet.payload, buffer, bytes_read);
+        while (!packet_sent) {
+            
+            sendto(sock,reinterpret_cast<const char*>(&data_packet), sizeof(data_packet) - (MAX_PAYLOAD_SIZE - bytes_read),0,reinterpret_cast<const sockaddr*>(&target), sizeof(target));
+            std::cout << "Sending packet: " << seq_num << ", data size: " << bytes_read << " B\n";
+            ControlPacket control_packet;
+            socklen_t len = sizeof(local);
+            int n = recvfrom(sock,reinterpret_cast<char*>(&control_packet),sizeof(control_packet),0,reinterpret_cast<sockaddr*>(&target), &len);
+            if (n < 0) {
+                std::cout << "Timeout. Sending packet " << seq_num << " again.\n";
+                tries++;
+                if (tries> 15) {
+                    std::cerr << "ENDING: Could not recieve ACK/NACK for paket " << seq_num << " after 15 tries.\n";
+                    closeSocket(sock);
+                    cleanupSockets();
+                    return 1;
+                }
+                continue; 
+            }
+            if (control_packet.seq_num == seq_num) {
+                if (control_packet.type == ACK) {
+                    std::cout << "ACK recieved succesfully for packet " << seq_num << ".\n";
+                    tries = 0;
+                    seq_num++;
+                    packet_sent = true;
+                } else if (control_packet.type == NACK) {
+                    tries = 0;
+                    std::cout << "NACK recieved for packet " << seq_num << ". Trying again.\n";
+                }
+            } else {
+                tries = 0;
+                std::cout << "IGNORING: Recieved acknowledgement for wrong seq number (" << control_packet.seq_num << ").\n";
+            }
+        }
+    }
+    ControlPacket stop_packet = {STOP, seq_num};
+    sendto(sock, reinterpret_cast<const char*>(&stop_packet),sizeof(ControlPacket), 0, reinterpret_cast<const sockaddr*>(&target), sizeof(target));
+    std::cout << "STOP sent\n.";
+    file.close();
     closeSocket(sock);
     cleanupSockets();
     return 0;
