@@ -112,12 +112,14 @@ int main(int argc, char* argv[]) {
     std::cout << "Sending START. File: " << file_name << ", Size: " << file_size << " B" 
               << ", Hash: " << file_hash << "to " << target_ip << ": " << target_port << "\n";
 
+    sockaddr_in recv_addr{};
+    socklen_t recv_len = sizeof(recv_addr);
     while (!started) {
         // Send START packetk
         sendto(sock,reinterpret_cast<const char*>(&start_packet),sizeof(StartPacket),0,reinterpret_cast<const sockaddr*>(&target), sizeof(target));
         ControlPacket control_packet;
-        socklen_t len = sizeof(local);
-        int n = recvfrom(sock,reinterpret_cast<char*>(&control_packet),sizeof(control_packet),0,reinterpret_cast<sockaddr*>(&target), &len);
+        socklen_t len = sizeof(target);
+        int n = recvfrom(sock,reinterpret_cast<char*>(&control_packet),sizeof(control_packet),0,reinterpret_cast<sockaddr*>(&recv_addr),&recv_len);
         if (n < 0) {
             std::cout << "Timemout: ACK for START not recieved. Sending again...\n";
             tries++;
@@ -160,7 +162,7 @@ int main(int argc, char* argv[]) {
             std::cout << "Sending packet: " << seq_num << ", data size: " << bytes_read << " B\n";
             ControlPacket control_packet;
             socklen_t len = sizeof(local);
-            int n = recvfrom(sock,reinterpret_cast<char*>(&control_packet),sizeof(control_packet),0,reinterpret_cast<sockaddr*>(&target), &len);
+            int n = recvfrom(sock,reinterpret_cast<char*>(&control_packet),sizeof(control_packet),0,reinterpret_cast<sockaddr*>(&recv_addr),&recv_len);
             if (n < 0) {
                 std::cout << "Timeout. Sending packet " << seq_num << " again.\n";
                 tries++;

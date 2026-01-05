@@ -48,7 +48,8 @@ int main(int argc, char* argv[]) {
         closeSocket(sock);
         return 1;
     }
-
+    sockaddr_in recv_addr{};
+    socklen_t   recv_len = sizeof(recv_addr);
     sockaddr_in local{}, target{};
     local.sin_family      = AF_INET; // IPv4
     local.sin_port        = htons(static_cast<uint16_t>(local_port)); // Convert host byte order - Little/Big endian
@@ -75,7 +76,7 @@ int main(int argc, char* argv[]) {
     // waiting for start packet - max wait time = 1 second, max tries = 15
     int tries = 0;
     while (!started) {
-        int n = recvfrom(sock,reinterpret_cast<char*>(&tmp_buffer),sizeof(tmp_buffer),0,reinterpret_cast<sockaddr*>(&target),&len_start);
+        int n = recvfrom(sock,reinterpret_cast<char*>(&tmp_buffer),sizeof(tmp_buffer),0,reinterpret_cast<sockaddr*>(&recv_addr),&recv_len);
         if (n < 0) {
             tries++;
             if (tries > 15) {
@@ -100,7 +101,7 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             ControlPacket ack_packet = {ACK, 0}; 
-            sendto(sock,reinterpret_cast<const char*>(&ack_packet),sizeof(ControlPacket),0,reinterpret_cast<const sockaddr*>(&target),len_start);
+            sendto(sock,reinterpret_cast<const char*>(&ack_packet),sizeof(ack_packet),0,reinterpret_cast<const sockaddr*>(&target),len_start);
             std::cout << "ACK sent, ready to recieve data.\n";
             started = true;
         } else {
@@ -113,7 +114,7 @@ int main(int argc, char* argv[]) {
     tries = 0;
     DataPacket data_packet;
     while (true) {
-        int n = recvfrom(sock,reinterpret_cast<char*>(&data_packet),sizeof(data_packet),0,reinterpret_cast<sockaddr*>(&target),&len);
+        int n = recvfrom(sock,reinterpret_cast<char*>(&data_packet),sizeof(data_packet),0,reinterpret_cast<sockaddr*>(&recv_addr),&recv_len);
         if (n < 0) {
             std::perror("Failed to recieve packet, trying again...");
             tries++;

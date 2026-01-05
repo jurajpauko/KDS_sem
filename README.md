@@ -12,3 +12,7 @@
   sender.exe 127.0.0.1 5555 8888 path_to_sebek.jpg
 
   be carefull the path must be with forward slashes (at least on my pc)
+
+
+
+sender.exe 127.0.0.1 14000 15001 C:/Users/ondra/Desktop/school/Semestr5/Komunikace_a_distribuovane_systemy/Semestralka/Jurko/KDS_sem-master/sebek.jpg
